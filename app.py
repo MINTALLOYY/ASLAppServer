@@ -136,13 +136,17 @@ def speech_ws(ws):
     """
     # Get conversation_id from query params (optional)
     conversation_id: Optional[str] = request.args.get("conversation_id")
-    # Initialize Google Speech streaming client
-    streamer = ChirpStreamer()
+    # Initialize Google Speech streaming client (with restart capability)
+    streamer_state = {"streamer": ChirpStreamer(), "active": True}
 
     # Background thread: consume responses from Google Speech and send to client
     def consume_responses():
         try:
-            for response in streamer.responses():
+            response_count = 0
+            print("[DEBUG] consume_responses started. Waiting for responses...")
+            for response in streamer_state["streamer"].responses():
+                response_count += 1
+                print(f"[DEBUG] Received response #{response_count}. Results count: {len(response.results)}")
                 for result in response.results:
                     if result.is_final:
                         try:
@@ -162,15 +166,19 @@ def speech_ws(ws):
                                 ws.send(message)
                             except Exception as e:
                                 print(f"WebSocket send error: {e}")  # Debug log for WebSocket error
-                                streamer.finish()
+                                streamer_state["streamer"].finish()
                                 return
                             try:
                                 if conversation_id and db:
                                     db.save_message(conversation_id=conversation_id, text=transcript, source="speech", speaker=speaker)
                             except Exception as e:
                                 print(f"Firestore save error: {e}")  # Debug log for Firestore error
+            print(f"[DEBUG] consume_responses finished. Total responses: {response_count}")
         except Exception as e:
             print(f"Error in consume_responses: {e}")  # Debug log for consume_responses error
+            # If the stream errored due to audio timeout, mark inactive so we can restart on next audio
+            if "Audio Timeout" in str(e) or "Audio Timeout Error" in str(e):
+                streamer_state["active"] = False
 
     # Start response consumer in background
     t = threading.Thread(target=consume_responses, daemon=True)
@@ -195,14 +203,30 @@ def speech_ws(ws):
                     cid = data.get("conversation_id")
                     if cid:
                         conversation_id = cid
-                streamer.add_audio_base64(b64 or "")
+                # If previous stream errored (timeout), restart a new stream and consumer
+                if not streamer_state["active"]:
+                    print("[DEBUG] Restarting speech stream due to previous timeout...")
+                    try:
+                        # Finish any old streamer
+                        try:
+                            streamer_state["streamer"].finish()
+                        except Exception:
+                            pass
+                        # Replace streamer and restart consumer thread
+                        streamer_state["streamer"] = ChirpStreamer()
+                        streamer_state["active"] = True
+                        t = threading.Thread(target=consume_responses, daemon=True)
+                        t.start()
+                    except Exception as e:
+                        print(f"[ERROR] Failed to restart speech stream: {e}")
+                streamer_state["streamer"].add_audio_base64(b64 or "")
             elif event in ("end", "finish", "close"):
                 # End the session
                 if not conversation_id:
                     cid = data.get("conversation_id")
                     if cid:
                         conversation_id = cid
-                streamer.finish()
+                streamer_state["streamer"].finish()
                 break
             elif event == "set_conversation":
                 # Set or update conversation_id mid-session
@@ -217,7 +241,7 @@ def speech_ws(ws):
     finally:
         # Clean up streaming resources
         try:
-            streamer.finish()
+            streamer_state["streamer"].finish()
         except Exception:
             pass
         try:

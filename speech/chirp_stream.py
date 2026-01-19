@@ -82,16 +82,22 @@ class ChirpStreamer:
             speech.StreamingRecognizeRequest: Audio chunks.
         """
         audio_passed = False  # Track if any audio is passed
+        chunk_count = 0
+        print("[DEBUG] _request_generator started.")
+        
         while not self._finished.is_set() or not self._audio_q.empty():
             try:
-                chunk = self._audio_q.get(timeout=0.1)
+                chunk = self._audio_q.get(timeout=0.5)
                 if chunk:
                     audio_passed = True
-                    print(f"[DEBUG] Sending audio chunk of size: {len(chunk)} bytes.")
+                    chunk_count += 1
+                    print(f"[DEBUG] Sending audio chunk #{chunk_count} of size: {len(chunk)} bytes. Queue size: {self._audio_q.qsize()}")
                     yield speech.StreamingRecognizeRequest(audio_content=chunk)
             except queue.Empty:
+                print(f"[DEBUG] Queue empty. _finished={self._finished.is_set()}, queue_empty={self._audio_q.empty()}")
                 continue
 
+        print(f"[DEBUG] _request_generator finished. Total chunks sent: {chunk_count}. Audio passed: {audio_passed}")
         if not audio_passed:
             print("[DEBUG] Connection made but no audio was passed through.")
 
