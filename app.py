@@ -19,6 +19,7 @@ sock = Sock(app)
 
 # FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID")
 # db = FirestoreDB(project_id=FIREBASE_PROJECT_ID)
+db = False
 
 creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 if creds and creds.strip().startswith("{"):
@@ -39,7 +40,9 @@ def health():
     Returns:
         JSON: {"status": "ok"} if the server is running.
     """
-    return jsonify({"status": "ok"})
+    if creds:
+        return jsonify({"status": "ok and creds"})
+    return jsonify({"status": "server running but no credentials"}), 500
 
 
 @app.post("/speech/finalize")
@@ -60,7 +63,8 @@ def speech_finalize():
     if not conversation_id:
         return jsonify({"error": "conversation_id is required"}), 400
     try:
-        db.finalize_conversation(conversation_id)
+        if db:
+            db.finalize_conversation(conversation_id)
         return jsonify({"status": "finalized", "conversation_id": conversation_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -102,9 +106,9 @@ def asl_transcribe():
         except Exception:
             pass
 
-    # Save result to Firestore if conversation_id provided
+    # Save result to Firestore if conversation_id provided and db is initialized
     try:
-        if conversation_id and text:
+        if conversation_id and text and db:
             db.save_message(conversation_id=conversation_id, text=text, source="asl")
     except Exception:
         pass
@@ -146,29 +150,27 @@ def speech_ws(ws):
                             transcript = (alt.transcript or "").strip()
                         except Exception:
                             transcript = ""
-                        # Determine speaker label from diarization if available
                         speaker = speaker_label_from_result(result)
                         if transcript:
                             try:
-                                # Send final transcript back to Flutter via WebSocket
-                                ws.send(json.dumps({
+                                message = json.dumps({
                                     "event": "final_transcript",
                                     "text": transcript,
                                     "speaker": speaker
-                                }))
-                            except Exception:
-                                # Client disconnected; stop streaming
+                                })
+                                print(f"Sending message: {message}")  # Debug log for sent message
+                                ws.send(message)
+                            except Exception as e:
+                                print(f"WebSocket send error: {e}")  # Debug log for WebSocket error
                                 streamer.finish()
                                 return
-                            # Save to Firestore if conversation_id is set
                             try:
-                                if conversation_id:
+                                if conversation_id and db:
                                     db.save_message(conversation_id=conversation_id, text=transcript, source="speech", speaker=speaker)
-                            except Exception:
-                                pass
-        except Exception:
-            # Streaming error or WebSocket closed
-            pass
+                            except Exception as e:
+                                print(f"Firestore save error: {e}")  # Debug log for Firestore error
+        except Exception as e:
+            print(f"Error in consume_responses: {e}")  # Debug log for consume_responses error
 
     # Start response consumer in background
     t = threading.Thread(target=consume_responses, daemon=True)

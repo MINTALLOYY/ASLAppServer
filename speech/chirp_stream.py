@@ -47,12 +47,12 @@ class ChirpStreamer:
         """Signal that no more audio will be sent; close the stream gracefully."""
         self._finished.set()
 
-    def _request_generator(self) -> Generator[speech.StreamingRecognizeRequest, None, None]:
+    def _get_streaming_config(self):
         """
-        Generate streaming requests for Google Speech gRPC API.
+        Create the streaming recognition config.
         
-        Yields:
-            speech.StreamingRecognizeRequest: Config first, then audio chunks.
+        Returns:
+            speech.StreamingRecognitionConfig: The config for streaming recognition.
         """
         diarization_config = speech.SpeakerDiarizationConfig(
             enable_speaker_diarization=True,
@@ -71,17 +71,29 @@ class ChirpStreamer:
             interim_results=False,
             single_utterance=False,
         )
-        # First request must contain the streaming config
-        yield speech.StreamingRecognizeRequest(streaming_config=streaming_config)
+        print(f"[DEBUG] Streaming config created: {streaming_config}")
+        return streaming_config
 
-        # Subsequent requests contain audio bytes
+    def _request_generator(self) -> Generator[speech.StreamingRecognizeRequest, None, None]:
+        """
+        Generate streaming requests for Google Speech gRPC API.
+        
+        Yields:
+            speech.StreamingRecognizeRequest: Audio chunks.
+        """
+        audio_passed = False  # Track if any audio is passed
         while not self._finished.is_set() or not self._audio_q.empty():
             try:
                 chunk = self._audio_q.get(timeout=0.1)
                 if chunk:
+                    audio_passed = True
+                    print(f"[DEBUG] Sending audio chunk of size: {len(chunk)} bytes.")
                     yield speech.StreamingRecognizeRequest(audio_content=chunk)
             except queue.Empty:
                 continue
+
+        if not audio_passed:
+            print("[DEBUG] Connection made but no audio was passed through.")
 
     def responses(self):
         """
@@ -90,7 +102,15 @@ class ChirpStreamer:
         Returns:
             Iterable of speech.StreamingRecognizeResponse.
         """
-        return self._client.streaming_recognize(requests=self._request_generator())
+        try:
+            print("[DEBUG] Starting streaming recognize call (v1 API)...")
+            streaming_config = self._get_streaming_config()
+            response_iterator = self._client.streaming_recognize(streaming_config, self._request_generator())
+            print("[DEBUG] Streaming recognize call started successfully.")
+            return response_iterator
+        except Exception as e:
+            print(f"[ERROR] Error in streaming_recognize: {e}")
+            raise
 
 
 def speaker_label_from_result(result: speech.StreamingRecognitionResult) -> Optional[str]:
