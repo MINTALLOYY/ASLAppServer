@@ -1,0 +1,8 @@
+aslapp-484203-ec8c8feee351.json
+.env
+**/__pycache__/
+*.pyc
+.venv/
+.venv311/
+.npy
+training_data/
